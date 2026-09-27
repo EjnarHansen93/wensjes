@@ -166,6 +166,10 @@ a.btn{text-decoration:none}
 .inline{display:flex;gap:10px;align-items:stretch}
 .inline .in{flex:1}
 .inline .btn{width:auto;padding-inline:18px}
+.stat.wide{grid-column:1/-1;grid-template-columns:auto 1fr auto;justify-items:start;align-items:center;text-align:left;column-gap:18px;padding:14px 20px}
+.stat.wide>svg:last-child{color:var(--muted)}
+.pin-in{text-align:center;letter-spacing:.6em;font-size:24px;font-weight:800}
+.pin-err{color:var(--red);font-weight:700;min-height:1.2em;margin:-4px 0 10px}
 .offline{margin-top:14px;padding:12px 14px;border-radius:16px;background:color-mix(in srgb,var(--red) 14%,var(--card));font-size:14px;font-weight:700}
 </style>
 </head>
@@ -329,17 +333,23 @@ async function load(key){
   if (error) throw error;
   S[key] = data.map(map);
 }
+/* Which profiles have a PIN. The PINs themselves never leave the database. */
+async function loadPins(){
+  const { data, error } = await sb.rpc('wl_profiles_with_pin');
+  if (error) throw error;
+  S.pinned = new Set((data || []).map(r => typeof r === 'string' ? r : Object.values(r)[0]));
+}
 const pending = {};
 function refresh(key){
   clearTimeout(pending[key]);
   pending[key] = setTimeout(async () => {
-    try { await load(key); S.offline = false; } catch { S.offline = true; }
+    try { await load(key); if (key === 'profiles') await loadPins(); S.offline = false; } catch { S.offline = true; }
     render(); if (S.sheet?.type === 'detail') openDetail(S.sheet.id);
   }, 150);
 }
 async function boot(){
   try {
-    await Promise.all(Object.keys(TABLES).map(load));
+    await Promise.all([...Object.keys(TABLES).map(load), loadPins()]);
     S.ready = true; S.offline = false;
   } catch {
     S.offline = true;
@@ -347,6 +357,7 @@ async function boot(){
     return;
   }
   render();
+  if (byId(S.me) && !S.pinned.has(S.me)) openPinSheet(S.me, 'setup', true);
   const ch = sb.channel('wensjes');
   for (const [key, [table]] of Object.entries(TABLES)) ch.on('postgres_changes', { event: '*', schema: 'public', table }, () => refresh(key));
   ch.subscribe();
@@ -354,7 +365,7 @@ async function boot(){
 }
 
 /* ---------- state ---------- */
-const S = { profiles: [], items: [], contribs: [], ready: false, offline: false, me: lsGet('wensjes.me'), tab: 'lists', viewId: null, sheet: null, welcome: false };
+const S = { pinned: new Set(), profiles: [], items: [], contribs: [], ready: false, offline: false, me: lsGet('wensjes.me'), tab: 'lists', viewId: null, sheet: null, welcome: false };
 const byId = id => S.profiles.find(p => p.id === id);
 const colorOf = p => COLORS[(p?.colorIdx ?? 0) % COLORS.length];
 const canSee = (owner, viewer) => owner && (owner.id === viewer || (owner.visibleTo || []).includes(viewer));
@@ -440,9 +451,7 @@ function viewList(lists){
   let cards;
   if (mine) {
     const others = S.profiles.filter(p => p.id !== S.me).length, shared = (owner.visibleTo || []).filter(id => byId(id)).length;
-    const total = its.reduce((s, i) => s + (i.price || 0), 0);
-    cards = `<button class="card stat" data-act="tab" data-tab="profile">${donut(others ? shared / others : 0, 'var(--green)')}<span class="lbl">Ziet mijn lijst</span><span class="val">${shared} ${shared === 1 ? 'persoon' : 'personen'}</span></button>
-      <div class="card stat">${donut(its.length ? its.filter(i => i.price != null).length / its.length : 0, 'var(--red)')}<span class="lbl">Totaal</span><span class="val">${eur(total)}</span></div>`;
+    cards = `<button class="card stat wide" data-act="tab" data-tab="profile">${donut(others ? shared / others : 0, 'var(--green)')}<span><span class="lbl" style="display:block">Ziet mijn lijst</span><span class="val">${shared} ${shared === 1 ? 'persoon' : 'personen'}</span></span>${ic('right', 22)}</button>`;
   } else {
     const res = its.filter(isTaken).length;
     cards = `<div class="card stat">${donut(its.length ? (its.length - res) / its.length : 0, 'var(--green)')}<span class="lbl">Nog vrij</span><span class="val">${its.length - res}</span></div>
@@ -516,15 +525,8 @@ function viewProfile(me){
           others.map(p => `<button class="person" role="checkbox" aria-checked="${vis.includes(p.id)}" data-act="vis" data-id="${p.id}">${personAv(p)}<b>${esc(p.name)}</b><span class="check">${ic('check', 18)}</span></button>`).join('')
         : `<div class="empty">${ic('users', 36)}<span>Nog geen andere profielen. Zodra familie een profiel maakt, kan je ze hier aanvinken.</span></div>`}
       </section>
-      <h2 class="sec-t">Mijn naam</h2>
-      <section class="card pad">
-        <form data-form="rename" class="inline">
-          <label class="sr" for="rename">Naam</label>
-          <input class="in" id="rename" name="name" value="${esc(me.name)}" maxlength="40" required>
-          <button class="btn green">Bewaar</button>
-        </form>
-      </section>
       <div class="btns" style="margin-top:18px">
+        <button class="btn soft" data-act="changepin">${ic('lock', 20)} Pincode wijzigen</button>
         <button class="btn line" data-act="logout">${ic('swap', 20)} Wissel van profiel</button>
       </div>
       <p class="hint" style="margin-top:14px;text-align:center">Tip: zet Wensjes op je beginscherm via het menu van je browser, "Toevoegen aan startscherm".</p>
@@ -540,6 +542,7 @@ function viewWelcome(){
         <form data-form="create">
           <div class="fld"><label for="newname">Nieuw profiel: je naam</label>
             <input class="in" id="newname" name="name" placeholder="Bv. Oma Rita" maxlength="40" autocomplete="given-name" required></div>
+          ${pinFields('Kies een pincode (4 cijfers)', true)}
           <button class="btn">${ic('gift', 20)} Maak mijn lijstje</button>
         </form>
       </section>
@@ -558,7 +561,32 @@ function bar(){
 }
 
 /* ---------- sheets ---------- */
-function openSheet(html){ $('#sheetRoot').innerHTML = `<div class="scrim" data-act="close"><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`; }
+function openSheet(html, forced = false){ $('#sheetRoot').innerHTML = `<div class="scrim" ${forced ? '' : 'data-act="close"'}><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`; }
+
+const pinInput = (name, label, pre = '') => `<div class="fld"><label for="${pre}${name}">${label}</label>
+  <input class="in pin-in" id="${pre}${name}" name="${name}" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" required></div>`;
+function pinFields(label, repeat, pre = ''){ return pinInput('pin', label, pre) + (repeat ? pinInput('pin2', 'Herhaal je pincode', pre) : '') + '<p class="pin-err" aria-live="polite"></p>'; }
+
+/* mode: 'login' (enter PIN), 'setup' (choose a first PIN), 'change' (old + new PIN). */
+function openPinSheet(id, mode, forced = false){
+  const p = byId(id); if (!p) return;
+  S.sheet = { type: 'pin' };
+  const title = mode === 'login' ? `Hallo ${esc(p.name)}` : mode === 'setup' ? 'Kies een pincode' : 'Pincode wijzigen';
+  const intro = mode === 'login' ? 'Geef je pincode in.'
+    : mode === 'setup' ? `Zo kan niemand anders zomaar in het profiel van ${esc(p.name)}. Onthoud hem goed.`
+    : 'Geef eerst je huidige pincode, daarna je nieuwe.';
+  openSheet(`<div class="grab"></div>
+    <div class="sheet-h"><h3>${title}</h3>${forced ? '' : `<button class="x" data-act="close" aria-label="Sluiten">${ic('x', 20)}</button>`}</div>
+    <p class="hint" style="margin:8px 0 14px">${intro}</p>
+    <form data-form="pin" data-id="${id}" data-mode="${mode}">
+      ${mode === 'change' ? pinInput('old', 'Huidige pincode', 's-') : ''}
+      ${pinFields(mode === 'login' ? 'Pincode' : 'Nieuwe pincode (4 cijfers)', mode !== 'login', 's-')}
+      <button class="btn">${ic('lock', 20)} ${mode === 'login' ? 'Aanmelden' : 'Bewaar pincode'}</button>
+    </form>`, forced);
+  setTimeout(() => $(mode === 'change' ? '#s-old' : '#s-pin')?.focus(), 50);
+}
+function loginAs(id){ S.me = id; lsSet('wensjes.me', id); S.tab = 'lists'; S.viewId = id; render(); }
+const PIN_MSG = { wrong: 'Verkeerde pincode.', locked: 'Te veel foute pogingen. Probeer over 5 minuten opnieuw.', invalid: 'Gebruik precies 4 cijfers.' };
 function closeSheet(){ $('#sheetRoot').innerHTML = ''; S.sheet = null; }
 
 function groupBlock(it){
@@ -703,7 +731,8 @@ document.addEventListener('click', async e => {
   if (a === 'tab') { S.tab = el.dataset.tab; S.welcome = false; render(); scrollTo(0, 0); }
   else if (a === 'nav') { const l = listsForMe(); S.viewId = l[Math.max(0, Math.min(l.length - 1, l.indexOf(S.viewId) + +el.dataset.dir))]; render(); }
   else if (a === 'viewlist') { S.viewId = el.dataset.id; S.tab = 'lists'; render(); scrollTo(0, 0); }
-  else if (a === 'pick') { S.me = el.dataset.id; lsSet('wensjes.me', S.me); S.tab = 'lists'; S.viewId = S.me; render(); }
+  else if (a === 'pick') openPinSheet(el.dataset.id, S.pinned.has(el.dataset.id) ? 'login' : 'setup');
+  else if (a === 'changepin') openPinSheet(S.me, 'change');
   else if (a === 'logout') { S.me = null; lsSet('wensjes.me', null); render(); }
   else if (a === 'open') openDetail(el.dataset.id);
   else if (a === 'add') { if (S.viewId !== S.me) { S.viewId = S.me; S.tab = 'lists'; render(); } openForm(); }
@@ -752,11 +781,31 @@ document.addEventListener('submit', async e => {
   const val = n => f.elements.namedItem(n)?.value.trim() ?? '';
   if (kind === 'create') {
     const name = val('name'); if (!name) return;
+    const pin = val('pin'), err = f.querySelector('.pin-err');
+    if (!/^[0-9]{4}$/.test(pin)) return err.textContent = 'Kies een pincode van precies 4 cijfers.';
+    if (pin !== val('pin2')) return err.textContent = 'De twee pincodes zijn niet gelijk.';
     const id = uid('p');
     const ok = await run(() => sb.from('wl_profiles').insert({ id, name, visible_to: [], color_idx: S.profiles.length }));
-    if (ok) { await load('profiles'); S.me = id; lsSet('wensjes.me', id); S.tab = 'profile'; S.welcome = true; render(); }
-  } else if (kind === 'rename') {
-    const name = val('name'); if (name) await run(() => sb.from('wl_profiles').update({ name }).eq('id', S.me), 'Naam bewaard', ['profiles']);
+    if (!ok) return;
+    const { data: set } = await sb.rpc('wl_set_pin', { p_id: id, p_old: null, p_new: pin });
+    await load('profiles'); await loadPins().catch(() => {});
+    S.me = id; lsSet('wensjes.me', id); S.tab = 'profile'; S.welcome = true; render();
+    if (set !== 'ok') openPinSheet(id, 'setup', true);
+  } else if (kind === 'pin') {
+    const id = f.dataset.id, mode = f.dataset.mode, pin = val('pin'), err = f.querySelector('.pin-err'), btn = f.querySelector('button');
+    if (!/^[0-9]{4}$/.test(pin)) return err.textContent = 'Vul precies 4 cijfers in.';
+    if (mode !== 'login' && pin !== val('pin2')) return err.textContent = 'De twee nieuwe pincodes zijn niet gelijk.';
+    btn.disabled = true; err.textContent = '';
+    const { data, error } = mode === 'login'
+      ? await sb.rpc('wl_check_pin', { p_id: id, p_pin: pin })
+      : await sb.rpc('wl_set_pin', { p_id: id, p_old: val('old') || null, p_new: pin });
+    btn.disabled = false;
+    if (error) return err.textContent = 'Geen verbinding. Probeer opnieuw.';
+    if (data === 'nopin') return openPinSheet(id, 'setup');
+    if (data !== 'ok') { err.textContent = mode === 'change' && data === 'wrong' ? 'Je huidige pincode klopt niet.' : PIN_MSG[data] || 'Dat lukte niet.'; f.reset(); return; }
+    S.pinned.add(id); closeSheet();
+    if (mode === 'login' || (mode === 'setup' && S.me !== id)) loginAs(id);
+    toast(mode === 'login' ? `Welkom ${byId(id)?.name || ''}` : 'Pincode bewaard');
   } else if (kind === 'contrib') {
     await contribute(f.dataset.id, val('amount'));
   } else if (kind === 'item') {
