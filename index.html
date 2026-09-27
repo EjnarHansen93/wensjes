@@ -170,6 +170,12 @@ a.btn{text-decoration:none}
 .stat.wide>svg:last-child{color:var(--muted)}
 .pin-in{text-align:center;letter-spacing:.6em;font-size:24px;font-weight:800}
 .pin-err{color:var(--red);font-weight:700;min-height:1.2em;margin:-4px 0 10px}
+.swipe{position:relative;overflow:hidden;border-bottom:1px solid var(--line)}
+.swipe:last-child{border-bottom:0}
+.swipe>.row{position:relative;z-index:1;background:var(--card);border-bottom:0;touch-action:pan-y;transition:transform .2s ease;user-select:none}
+.swipe-del{position:absolute;top:0;right:0;bottom:0;width:96px;display:grid}
+.swipe-del button{background:var(--red);color:#fff;font-weight:800;font-size:13px;display:grid;place-items:center;align-content:center;gap:4px}
+@media (prefers-reduced-motion: reduce){.swipe>.row{transition:none}}
 .offline{margin-top:14px;padding:12px 14px;border-radius:16px;background:color-mix(in srgb,var(--red) 14%,var(--card));font-size:14px;font-weight:700}
 </style>
 </head>
@@ -338,6 +344,8 @@ async function loadPins(){
   const { data, error } = await sb.rpc('wl_profiles_with_pin');
   if (error) throw error;
   S.pinned = new Set((data || []).map(r => typeof r === 'string' ? r : Object.values(r)[0]));
+  const adm = await sb.rpc('wl_admin_ids');
+  if (!adm.error) S.admins = new Set((adm.data || []).map(r => typeof r === 'string' ? r : Object.values(r)[0]));
 }
 const pending = {};
 function refresh(key){
@@ -365,7 +373,7 @@ async function boot(){
 }
 
 /* ---------- state ---------- */
-const S = { pinned: new Set(), profiles: [], items: [], contribs: [], ready: false, offline: false, me: lsGet('wensjes.me'), tab: 'lists', viewId: null, sheet: null, welcome: false };
+const S = { pinned: new Set(), admins: new Set(), profiles: [], items: [], contribs: [], ready: false, offline: false, me: lsGet('wensjes.me'), tab: 'lists', viewId: null, sheet: null, welcome: false };
 const byId = id => S.profiles.find(p => p.id === id);
 const colorOf = p => COLORS[(p?.colorIdx ?? 0) % COLORS.length];
 const canSee = (owner, viewer) => owner && (owner.id === viewer || (owner.visibleTo || []).includes(viewer));
@@ -444,6 +452,10 @@ function groupsCard(){
   </section>`;
 }
 
+function swipeRow(it){
+  return `<div class="swipe"><div class="swipe-del"><button data-act="swdel" data-id="${it.id}" aria-label="Verwijder ${esc(it.title)}">${ic('trash', 22)}<span>Verwijder</span></button></div>${itemRow(it, true)}</div>`;
+}
+
 function viewList(lists){
   const idx = lists.indexOf(S.viewId), owner = byId(S.viewId), mine = S.viewId === S.me;
   const its = itemsOf(S.viewId);
@@ -468,7 +480,8 @@ function viewList(lists){
       ${groupsCard()}
       ${!mine ? `<div class="banner">${ic('lock', 20)}<span>${esc(owner.name)} ziet niet wat er gekozen is. De verrassing blijft dus heel.</span></div>` : ''}
       <section class="card list"><div class="list-h"><h2>Wensen</h2><span>(${its.length})</span></div>
-        ${its.length ? its.map(i => itemRow(i, mine)).join('') : empty}
+        ${its.length && mine ? '<p class="hint" style="margin:10px 18px 0">Veeg een wens naar links om hem te verwijderen.</p>' : ''}
+        ${its.length ? its.map(i => mine ? swipeRow(i) : itemRow(i, mine)).join('') : empty}
       </section>
     </div>`;
 }
@@ -529,6 +542,14 @@ function viewProfile(me){
         <button class="btn soft" data-act="changepin">${ic('lock', 20)} Pincode wijzigen</button>
         <button class="btn line" data-act="logout">${ic('swap', 20)} Wissel van profiel</button>
       </div>
+      ${S.admins.has(S.me) && others.length ? `<h2 class="sec-t">Beheer: alle accounts</h2>
+      <section class="card list" style="margin-top:0">
+        ${others.map(p => `<div class="person">${personAv(p)}<span><b>${esc(p.name)}</b><span style="display:block;color:var(--muted);font-size:14px">${itemsOf(p.id).length} wensen</span></span>
+          <button class="btn-sm" style="color:var(--red)" data-act="delacct" data-id="${p.id}">${ic('trash', 16)} Verwijder</button></div>`).join('')}
+      </section>` : ''}
+      <div class="btns" style="margin-top:18px">
+        <button class="btn danger" data-act="delacct" data-id="${S.me}">${ic('trash', 20)} Mijn account verwijderen</button>
+      </div>
       <p class="hint" style="margin-top:14px;text-align:center">Tip: zet Wensjes op je beginscherm via het menu van je browser, "Toevoegen aan startscherm".</p>
     </div>`;
 }
@@ -585,8 +606,22 @@ function openPinSheet(id, mode, forced = false){
     </form>`, forced);
   setTimeout(() => $(mode === 'change' ? '#s-old' : '#s-pin')?.focus(), 50);
 }
+function openDeleteSheet(target){
+  const p = byId(target); if (!p) return;
+  const self = target === S.me;
+  S.sheet = { type: 'pin' };
+  openSheet(`<div class="grab"></div>
+    <div class="sheet-h"><h3>${self ? 'Account verwijderen?' : `${esc(p.name)} verwijderen?`}</h3><button class="x" data-act="close" aria-label="Sluiten">${ic('x', 20)}</button></div>
+    <p class="hint" style="margin:8px 0 14px">${self ? 'Je profiel en al je wensen worden gewist.' : `Het profiel van ${esc(p.name)} en al die wensen worden gewist.`} Dit kan je niet ongedaan maken. Geef ${self ? 'je' : 'jouw eigen'} pincode om te bevestigen.</p>
+    <form data-form="delacct" data-id="${target}">
+      ${pinFields('Jouw pincode', false, 's-')}
+      <button class="btn danger">${ic('trash', 20)} Definitief verwijderen</button>
+    </form>`);
+  setTimeout(() => $('#s-pin')?.focus(), 50);
+}
+function closeSwipes(except){ document.querySelectorAll('.swipe.open').forEach(b => { if (b !== except) { b.classList.remove('open'); b.querySelector('.row').style.transform = ''; } }); }
 function loginAs(id){ S.me = id; lsSet('wensjes.me', id); S.tab = 'lists'; S.viewId = id; render(); }
-const PIN_MSG = { wrong: 'Verkeerde pincode.', locked: 'Te veel foute pogingen. Probeer over 5 minuten opnieuw.', invalid: 'Gebruik precies 4 cijfers.' };
+const PIN_MSG = { forbidden: 'Alleen een beheerder mag andere accounts verwijderen.', wrong: 'Verkeerde pincode.', locked: 'Te veel foute pogingen. Probeer over 5 minuten opnieuw.', invalid: 'Gebruik precies 4 cijfers.' };
 function closeSheet(){ $('#sheetRoot').innerHTML = ''; S.sheet = null; }
 
 function groupBlock(it){
@@ -724,6 +759,7 @@ async function contribute(id, raw){
 
 /* ---------- events ---------- */
 document.addEventListener('click', async e => {
+  if (swipeClickBlock) { swipeClickBlock = false; return; }
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const a = el.dataset.act;
@@ -734,7 +770,9 @@ document.addEventListener('click', async e => {
   else if (a === 'pick') openPinSheet(el.dataset.id, S.pinned.has(el.dataset.id) ? 'login' : 'setup');
   else if (a === 'changepin') openPinSheet(S.me, 'change');
   else if (a === 'logout') { S.me = null; lsSet('wensjes.me', null); render(); }
-  else if (a === 'open') openDetail(el.dataset.id);
+  else if (a === 'open') { const box = el.closest('.swipe.open'); if (box) closeSwipes(); else openDetail(el.dataset.id); }
+  else if (a === 'swdel') { el.disabled = true; await run(() => sb.from('wl_items').delete().eq('id', el.dataset.id), 'Wens verwijderd', ['items', 'contribs']); }
+  else if (a === 'delacct') openDeleteSheet(el.dataset.id);
   else if (a === 'add') { if (S.viewId !== S.me) { S.viewId = S.me; S.tab = 'lists'; render(); } openForm(); }
   else if (a === 'edit') openForm(S.items.find(i => i.id === el.dataset.id));
   else if (a === 'mode') { syncDraft(); draft.source = el.dataset.mode; drawForm(); if (draft.source === 'link') $('#url')?.focus(); }
@@ -757,6 +795,39 @@ document.addEventListener('click', async e => {
     else { el.dataset.sure = '1'; el.innerHTML = ic('trash', 20) + ' Tik nog eens om te verwijderen'; }
   }
 });
+
+/* Swipe a wish on your own list to the left to reveal "Verwijder". */
+let sw = null, swipeClickBlock = false;
+const SW_OPEN = -96;
+document.addEventListener('pointerdown', e => {
+  swipeClickBlock = false; // a new tap is never the tail of a swipe
+  if (e.target.closest('.swipe-del')) return;
+  const row = e.target.closest('.swipe > .row');
+  closeSwipes(row?.parentElement);
+  if (!row) return;
+  sw = { box: row.parentElement, row, x0: e.clientX, y0: e.clientY, dx: 0, dir: null, base: row.parentElement.classList.contains('open') ? SW_OPEN : 0 };
+});
+document.addEventListener('pointermove', e => {
+  if (!sw) return;
+  const dx = e.clientX - sw.x0, dy = e.clientY - sw.y0;
+  if (!sw.dir) { if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; sw.dir = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y'; }
+  if (sw.dir !== 'x') { sw = null; return; }
+  sw.dx = dx;
+  sw.row.style.transition = 'none';
+  sw.row.style.transform = `translateX(${Math.max(-130, Math.min(0, sw.base + dx))}px)`;
+});
+function endSwipe(){
+  if (!sw) return;
+  const s = sw; sw = null;
+  if (s.dir !== 'x') return;
+  swipeClickBlock = true; setTimeout(() => swipeClickBlock = false, 350);
+  s.row.style.transition = '';
+  const open = s.base + s.dx < SW_OPEN / 2;
+  s.box.classList.toggle('open', open);
+  s.row.style.transform = open ? `translateX(${SW_OPEN}px)` : '';
+}
+document.addEventListener('pointerup', endSwipe);
+document.addEventListener('pointercancel', endSwipe);
 
 /* Pasting a link fetches its photo and details straight away. */
 let urlTimer;
@@ -806,6 +877,21 @@ document.addEventListener('submit', async e => {
     S.pinned.add(id); closeSheet();
     if (mode === 'login' || (mode === 'setup' && S.me !== id)) loginAs(id);
     toast(mode === 'login' ? `Welkom ${byId(id)?.name || ''}` : 'Pincode bewaard');
+  } else if (kind === 'delacct') {
+    const target = f.dataset.id, pin = val('pin'), err = f.querySelector('.pin-err'), btn = f.querySelector('button');
+    if (!/^[0-9]{4}$/.test(pin)) return err.textContent = 'Vul precies 4 cijfers in.';
+    btn.disabled = true; err.textContent = '';
+    const { data, error } = await sb.rpc('wl_delete_profile', { p_target: target, p_actor: S.me, p_pin: pin });
+    btn.disabled = false;
+    if (error) return err.textContent = 'Geen verbinding. Probeer opnieuw.';
+    if (data === 'nopin') return openPinSheet(S.me, 'setup');
+    if (data !== 'ok') { err.textContent = PIN_MSG[data] || 'Dat lukte niet.'; f.reset(); return; }
+    const name = byId(target)?.name || '';
+    closeSheet();
+    if (target === S.me) { S.me = null; lsSet('wensjes.me', null); S.tab = 'lists'; }
+    await Promise.all(['profiles', 'items', 'contribs'].map(k => load(k).catch(() => {})));
+    await loadPins().catch(() => {});
+    render(); toast(target === S.me || !byId(S.me) ? 'Je account is verwijderd' : `Account van ${name} verwijderd`);
   } else if (kind === 'contrib') {
     await contribute(f.dataset.id, val('amount'));
   } else if (kind === 'item') {
