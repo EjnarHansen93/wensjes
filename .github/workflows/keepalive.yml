@@ -1,0 +1,39 @@
+# Keeps the free Supabase project awake: it is paused after about a week without database activity.
+# One small read query per day; nothing in the data is changed.
+name: Supabase wakker houden
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # elke dag rond 7u/8u Belgische tijd
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Database even aanspreken
+        env:
+          SB_URL: https://utvpwrysjgxkowvfnvrj.supabase.co
+          # Public publishable key, the same one the app itself uses.
+          SB_KEY: sb_publishable_Uz9-0SgUZJVWQ7vfgjqn1w_L8Ga7asP
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$SB_URL/rest/v1/wl_profiles?select=id&limit=1" -H "apikey: $SB_KEY")
+          echo "Supabase antwoordde met HTTP $code"
+          test "$code" = "200"
+
+      # GitHub stops scheduled workflows in repositories without activity for 60 days.
+      # An empty commit every ~45 days keeps this one running.
+      - uses: actions/checkout@v4
+      - name: Repository actief houden
+        run: |
+          days=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+          echo "Laatste commit: $days dagen geleden"
+          if [ "$days" -ge 45 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "Automatisch: workflow actief houden"
+            git push
+          fi
